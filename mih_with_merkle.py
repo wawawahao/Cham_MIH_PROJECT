@@ -9,6 +9,66 @@ import json
 import pickle
 import os
 
+from charm.toolbox.Hash import ChamHash
+from charm.toolbox.integergroup import IntegerGroupQ
+from charm.core.math.integer import integer
+
+class ChamHash_Adm05(ChamHash):
+    def __init__(self, p=0, q=0):
+        ChamHash.__init__(self)
+        global group
+        group = IntegerGroupQ(0)
+        group.p, group.q, group.r = p, q, 2
+        self.group = group
+    
+    def paramgen(self, secparam=1024, datapath='cham_info.pkl'):
+        if os.path.exists(datapath):
+            with open(datapath, 'rb') as f:
+                cham_info = pickle.load(f)
+                pk = {}
+                sk = {}
+                pk['g'] = group.deserialize(cham_info['pk']['g'])
+                pk['y'] = group.deserialize(cham_info['pk']['y'])
+                sk['x'] = group.deserialize(cham_info['sk']['x'])
+        else:
+            if group.p == 0 or group.q == 0:
+                group.paramgen(secparam)
+            g, x = group.randomGen(), group.random()    # g, [1,q-1]
+            y = g ** x
+            pk = {'g': g, 'y': y}
+            sk = {'x': x}
+            pk_serialized = {
+                'g': group.serialize(g),
+                'y': group.serialize(y)
+            }
+            sk_serialized = {
+                'x': group.serialize(x)
+            }
+            with open(datapath, 'wb') as f:
+                cham_info = {
+                    'pk': pk_serialized,
+                    'sk': sk_serialized
+                }
+                pickle.dump(cham_info, f)
+        return pk, sk
+    
+    def hash(self, pk, m, r=0, s=0):
+        p, q = group.p, group.q
+        if r == 0:
+            r = group.random()
+        if s == 0:
+            s = group.random()
+
+        if type(r) == bytes:
+            r = group.deserialize(r)
+        if type(s) == bytes:
+            s = group.deserialize(s)
+
+        e = group.hash(m, r)
+        
+        C = r - (((pk['y'] ** e) * (pk['g'] ** s)) % p) % q
+        return group.serialize(C), group.serialize(r), group.serialize(s)
+
 
 class Element:
     def __init__(self, hash, id, raw_data=None):
@@ -18,23 +78,33 @@ class Element:
 
 
 class LeafNode:
-    def __init__(self, elements, id):
+    def __init__(self, elements, id, cham_hash, pk):
         self.id = id
         self.elements = elements
-        self.merkle_hash = sha256(b''.join([element.merkle_hash for element in elements])).digest()
+        # self.C = None
+        self.r = None
+        self.s = None
+        # self.merkle_hash = sha256(b''.join([element.merkle_hash for element in elements])).digest()
+        temp_hash, self.r, self.s = cham_hash.hash(pk, b''.join([element.merkle_hash for element in elements]))
+        self.merkle_hash = sha256(temp_hash).digest()
 
 
 class BucketNode:
-    def __init__(self, hashs, leaf_nodes, id):
+    def __init__(self, hashs, leaf_nodes, id, cham_hash, pk):
         self.id = id
         self.hashs = hashs
         self.leaf_nodes = leaf_nodes
         self.hash2leaf = dict(zip(hashs, leaf_nodes))
-        self.merkle_hash = sha256(b''.join([leaf_node.merkle_hash for leaf_node in leaf_nodes])).digest()
+        # self.C = None
+        self.r = None
+        self.s = None
+        # self.merkle_hash = sha256(b''.join([leaf_node.merkle_hash for leaf_node in leaf_nodes])).digest()
+        temp_hash, self.r, self.s = cham_hash.hash(pk, b''.join([leaf_node.merkle_hash for leaf_node in leaf_nodes]))
+        self.merkle_hash = sha256(temp_hash).digest()
 
 
 class MIHIndex:
-    def __init__(self, database_path='5_23_total_small.bin', hash_length=128, word_length=16):
+    def __init__(self, database_path='5_23_total_small.bin', hash_length=128, word_length=16, cham_hash=None, pk=None, sk=None):
         self._hash_length = hash_length
         self._word_length = word_length
 
@@ -42,9 +112,9 @@ class MIHIndex:
         self.buckets = []
         self.root_merkle_hash = None
 
-        self.build_index(database_path)
+        self.build_index(database_path, cham_hash, pk)
 
-    def build_index(self, database_path):
+    def build_index(self, database_path, cham_hash, pk):
         # load MIHIndex
         if os.path.exists('mih_index.pkl'):
             with open('mih_index.pkl', 'rb') as f:
@@ -85,9 +155,9 @@ class MIHIndex:
                 leaf_nodes = []
                 hashs = []
                 for key, value in index.items():
-                    leaf_nodes.append(LeafNode([self.elements[i] for i in value], len(leaf_nodes)))
+                    leaf_nodes.append(LeafNode([self.elements[i] for i in value], len(leaf_nodes), cham_hash, pk))
                     hashs.append(key)
-                self.buckets.append(BucketNode(hashs, leaf_nodes, bucket_id))
+                self.buckets.append(BucketNode(hashs, leaf_nodes, bucket_id, cham_hash, pk))
             self.root_merkle_hash = sha256(b''.join([bucket.merkle_hash for bucket in self.buckets])).digest()
             # dump MIHIndex
             with open('mih_index.pkl', 'wb') as f:
@@ -170,7 +240,11 @@ class MIHIndex:
                                     'leaf_id': bucket.hash2leaf[word].id,
                                     'distance': distance,
                                     'hash': element.hash.hex(),
-                                    'subling_merkle_hashs': []
+                                    'subling_merkle_hashs': [],
+                                    'leaf_r': bucket.hash2leaf[word].r,
+                                    'leaf_s': bucket.hash2leaf[word].s,
+                                    'bucket_r': bucket.r,
+                                    'bucket_s': bucket.s
                                 }
                                 for subling in bucket.hash2leaf[word].elements:
                                     if subling.id != element.id:
@@ -215,7 +289,7 @@ class MIHIndex:
         return results, merkle_tree
 
 
-def verify_proof(results, merkle_tree):
+def verify_proof(results, merkle_tree, cham_hash, pk):
     bucket_hash = []
     try:  # 当敌手增加或删除了 results 以及 merkle_tree 时，可能会导致异常
         for i, bucket in enumerate(merkle_tree['buckets']):
@@ -242,8 +316,10 @@ def verify_proof(results, merkle_tree):
                                 subling_merkle_hashs.append(bytes.fromhex(subling_merkle_hash))
                             else:
                                 subling_merkle_hashs.append(result_hash)
-                        leaf_hash.append(sha256(b''.join(subling_merkle_hashs)).digest())
-                bucket_hash.append(sha256(b''.join(leaf_hash)).digest())
+                        temp_hash_1, temp_r_1, temp_s_2 = cham_hash.hash(pk, b''.join(subling_merkle_hashs), result['leaf_r'], result['leaf_s'])
+                        leaf_hash.append(sha256(temp_hash_1).digest())
+                temp_hash_2, temp_r_1, temp_r_2 = cham_hash.hash(pk, b''.join(leaf_hash), result['bucket_r'], result['bucket_s'])
+                bucket_hash.append(sha256(temp_hash_2).digest())
         root_hash = sha256(b''.join(bucket_hash)).digest()
     except:
         return False
@@ -255,7 +331,14 @@ def random_hash(length):
 
 
 if __name__ == '__main__':
-    mih = MIHIndex(database_path='webface10b.bin', hash_length=128, word_length=16)
+
+    # 初始化 chamhash 的参数p, q
+    p = integer(141660875619984104245410764464185421040193281776686085728248762539241852738181649330509191671665849071206347515263344232662465937366909502530516774705282764748558934610432918614104329009095808618770549804432868118610669336907161081169097403439689930233383598055540343198389409225338204714777812724565461351567)
+    q = integer(70830437809992052122705382232092710520096640888343042864124381269620926369090824665254595835832924535603173757631672116331232968683454751265258387352641382374279467305216459307052164504547904309385274902216434059305334668453580540584548701719844965116691799027770171599194704612669102357388906362282730675783)
+    cham_hash = ChamHash_Adm05(p, q)
+    pk, sk = cham_hash.paramgen()
+
+    mih = MIHIndex(database_path='webface10b.bin', hash_length=128, word_length=16, cham_hash=cham_hash, pk=pk, sk=sk)
     anchor = bytes.fromhex("c595f84f4eaf47f46bc1186098802f90")
     print('待检索的 anchor: ', anchor.hex())
 
@@ -274,5 +357,5 @@ if __name__ == '__main__':
     print('MIH 搜索耗时: ', time.time() - s)
 
     s = time.time()
-    print('验证结果: ', verify_proof(results, merkle_tree))
+    print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
     print('验证耗时: ', time.time() - s)
