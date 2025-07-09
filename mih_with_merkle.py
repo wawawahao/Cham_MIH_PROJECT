@@ -68,6 +68,17 @@ class ChamHash_Adm05(ChamHash):
         
         C = r - (((pk['y'] ** e) * (pk['g'] ** s)) % p) % q
         return group.serialize(C), group.serialize(r), group.serialize(s)
+    
+    @staticmethod
+    def find_collision(pk, sk, C, new_message):
+        p, q = group.p, group.q
+        k_prime = group.random()
+        C = group.deserialize(C)
+        r_prime = C + ((pk['g'] ** k_prime) % p) % q
+        e_prime = group.hash(new_message, r_prime)
+        s_prime = (k_prime - (e_prime * sk['x'])) % q
+        C_prime = r_prime - (((pk['y'] ** e_prime) * (pk['g'] ** s_prime)) % p) % q
+        return group.serialize(C_prime), group.serialize(r_prime), group.serialize(s_prime)
 
 
 class Element:
@@ -81,12 +92,12 @@ class LeafNode:
     def __init__(self, elements, id, cham_hash, pk):
         self.id = id
         self.elements = elements
-        # self.C = None
+        self.C = None
         self.r = None
         self.s = None
         # self.merkle_hash = sha256(b''.join([element.merkle_hash for element in elements])).digest()
-        temp_hash, self.r, self.s = cham_hash.hash(pk, b''.join([element.merkle_hash for element in elements]))
-        self.merkle_hash = sha256(temp_hash).digest()
+        self.C, self.r, self.s = cham_hash.hash(pk, b''.join([element.merkle_hash for element in elements]))
+        self.merkle_hash = sha256(self.C).digest()
 
 
 class BucketNode:
@@ -95,12 +106,12 @@ class BucketNode:
         self.hashs = hashs
         self.leaf_nodes = leaf_nodes
         self.hash2leaf = dict(zip(hashs, leaf_nodes))
-        # self.C = None
+        self.C = None
         self.r = None
         self.s = None
         # self.merkle_hash = sha256(b''.join([leaf_node.merkle_hash for leaf_node in leaf_nodes])).digest()
-        temp_hash, self.r, self.s = cham_hash.hash(pk, b''.join([leaf_node.merkle_hash for leaf_node in leaf_nodes]))
-        self.merkle_hash = sha256(temp_hash).digest()
+        self.C, self.r, self.s = cham_hash.hash(pk, b''.join([leaf_node.merkle_hash for leaf_node in leaf_nodes]))
+        self.merkle_hash = sha256(self.C).digest()
 
 
 class MIHIndex:
@@ -111,6 +122,7 @@ class MIHIndex:
         self.elements = []
         self.buckets = []
         self.root_merkle_hash = None
+        self.cnt = 0
 
         self.build_index(database_path, cham_hash, pk)
 
@@ -140,6 +152,7 @@ class MIHIndex:
             for element_id in tqdm(range(len_database), desc='Loading database'):
                 element_hash = database[element_id*self._hash_length:(element_id+1)*self._hash_length].tobytes()
                 self.elements.append(Element(element_hash, element_id))
+                self.cnt += 1
             
             buckets_count = self._hash_length // self._word_length
             for bucket_id in tqdm(range(buckets_count), desc='Building index'):
@@ -287,7 +300,88 @@ class MIHIndex:
                         merkle_tree['leaves'][i].append(None)
         
         return results, merkle_tree
+    
+    def add(self, element, cham_hash, pk, sk):
+        if type(element) == bytes:
+            tmp = bitarray()
+            tmp.frombytes(element)
+            anchor = tmp
+        if len(anchor) != self._hash_length:
+            raise ValueError('Invalid hash length encountered, expected: {}, got: {}'.format(self._hash_length, len(anchor)))
 
+        for bucket in self.buckets:
+            anchor_word = anchor[bucket.id*self._word_length:(bucket.id+1)*self._word_length].tobytes()
+            if anchor_word in bucket.hash2leaf:
+                print("Option 1, need to add element to existing leaf node")
+                leaf_node = bucket.hash2leaf[anchor_word]
+                tmp_merkle_hash = b''.join([ele.merkle_hash for ele in leaf_node.elements])
+                tmp_merkle_hash += sha256(anchor.tobytes()).digest()
+                temp_hash, new_r, new_s = cham_hash.find_collision(pk, sk, leaf_node.C, tmp_merkle_hash)
+                if sha256(temp_hash).digest() == leaf_node.merkle_hash:
+                    print("Find collision successfully, adding element to leaf node")
+                    leaf_node.elements.append(Element(anchor.tobytes(), self.cnt))
+                    leaf_node.r = new_r
+                    leaf_node.s = new_s
+                else:
+                    raise ValueError('Failed to add element, merkle hash mismatch')
+            else:
+                print("Option 2, need to create a new leaf node")
+                new_leaf_node = LeafNode([Element(anchor.tobytes(), self.cnt)], len(bucket.leaf_nodes), cham_hash, pk)
+                tmp_merkle_hash = b''.join([leaf.merkle_hash for leaf in bucket.leaf_nodes])
+                tmp_merkle_hash += new_leaf_node.merkle_hash
+                temp_hash, new_r, new_s = cham_hash.find_collision(pk, sk, bucket.C, tmp_merkle_hash)
+                if sha256(temp_hash).digest() == bucket.merkle_hash:
+                    print("Find collision successfully, adding new leaf node")
+                    bucket.leaf_nodes.append(new_leaf_node)
+                    bucket.hashs.append(anchor_word)
+                    bucket.hash2leaf[anchor_word] = new_leaf_node
+                    bucket.r = new_r
+                    bucket.s = new_s
+                else:
+                    raise ValueError('Failed to add element, merkle hash mismatch')
+
+        self.elements.append(Element(anchor.tobytes(), self.cnt))
+        self.cnt += 1
+
+        return
+
+    def delete(self, element, cham_hash, pk, sk):
+        if type(element) == bytes:
+            tmp = bitarray()
+            tmp.frombytes(element)
+            anchor = tmp
+        if len(anchor) != self._hash_length:
+            raise ValueError('Invalid hash length encountered, expected: {}, got: {}'.format(self._hash_length, len(anchor)))
+
+        for bucket in self.buckets:
+            anchor_word = anchor[bucket.id*self._word_length:(bucket.id+1)*self._word_length].tobytes()
+            leaf_node = bucket.hash2leaf[anchor_word]
+            tmp_merkle_hash = b''
+            for ele in leaf_node.elements:
+                if ele.merkle_hash != sha256(anchor.tobytes()).digest():
+                    tmp_merkle_hash += ele.merkle_hash
+            temp_hash, new_r, new_s = cham_hash.find_collision(pk, sk, leaf_node.C, tmp_merkle_hash)
+            if sha256(temp_hash).digest() == leaf_node.merkle_hash:
+                print("Find collision successfully, deleting element from leaf node")
+                for ele in leaf_node.elements:
+                    if ele.merkle_hash == sha256(anchor.tobytes()).digest():
+                        leaf_node.elements.remove(ele)
+                        break
+                leaf_node.r = new_r
+                leaf_node.s = new_s
+            else:
+                raise ValueError('Failed to delete element, merkle hash mismatch')
+
+        for ele in self.elements:
+            if ele.merkle_hash == sha256(anchor.tobytes()).digest():
+                self.elements.remove(ele)
+
+        return 
+
+    def save(self, filepath='mih_index.pkl'):
+        with open(filepath, 'wb') as f:
+            pickle.dump(self, f)
+        return
 
 def verify_proof(results, merkle_tree, cham_hash, pk):
     bucket_hash = []
@@ -353,8 +447,60 @@ if __name__ == '__main__':
     results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
     # print(json.dumps(results, indent=4))
     # print(merkle_tree)
-    print('MIH 搜索结果: ', list(results.keys()))
     print('MIH 搜索耗时: ', time.time() - s)
+    print('MIH 搜索结果: ', list(results.keys()))
+
+    s = time.time()
+    print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
+    print('验证耗时: ', time.time() - s)
+
+    # test add
+    # new_element = bytes.fromhex("c595f84f4eaf47f46bc1186098802f91")
+    new_element = bytes.fromhex("ffffffffffffffffffffffffffffffff")
+    print('待添加的 anchor: ', new_element.hex())
+    s = time.time()
+    mih.add(new_element, cham_hash, pk, sk)
+    print('添加耗时: ', time.time() - s)
+    mih.save()
+
+    print("汉明距离阈值： ", t)
+    s = time.time()
+    results = mih.linear_search(anchor, hamming_distance_threshold=t)
+    print('线性搜索耗时: ', time.time() - s)
+    print('线性搜索结果: ', list(results.keys()))
+
+    s = time.time()
+    results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
+    # print(json.dumps(results, indent=4))
+    # print(merkle_tree)
+    print('MIH 搜索耗时: ', time.time() - s)
+    print('MIH 搜索结果: ', list(results.keys()))
+
+    s = time.time()
+    print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
+    print('验证耗时: ', time.time() - s)
+
+    # test delete
+    # del_element = bytes.fromhex("c595f84f4eaf47f46bc1186098802f91")
+    del_element = bytes.fromhex("ffffffffffffffffffffffffffffffff")
+    print('待删除的 anchor: ', del_element.hex())
+    s = time.time()
+    mih.delete(del_element, cham_hash, pk, sk)
+    print('删除耗时: ', time.time() - s)
+    mih.save()
+
+    print("汉明距离阈值： ", t)
+    s = time.time()
+    results = mih.linear_search(anchor, hamming_distance_threshold=t)
+    print('线性搜索耗时: ', time.time() - s)
+    print('线性搜索结果: ', list(results.keys()))
+
+    s = time.time()
+    results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
+    # print(json.dumps(results, indent=4))
+    # print(merkle_tree)
+    print('MIH 搜索耗时: ', time.time() - s)
+    print('MIH 搜索结果: ', list(results.keys()))
 
     s = time.time()
     print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
