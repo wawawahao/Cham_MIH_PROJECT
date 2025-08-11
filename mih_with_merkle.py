@@ -134,6 +134,7 @@ class MIHIndex:
                 self.elements = mih.elements
                 self.buckets = mih.buckets
                 self.root_merkle_hash = mih.root_merkle_hash
+                self.cnt = mih.cnt
                 return
         else:
             print('MIHIndex not found, building MIHIndex from scratch...')
@@ -238,33 +239,38 @@ class MIHIndex:
             raise ValueError('Invalid hash length encountered, expected: {}, got: {}'.format(self._hash_length, len(anchor)))
 
         results = {}
-
+        # 根据当前element列表生成一个candidate列表，全部用0表示，当某一个element被作为candidate时，将其置为1，用于后续再次被选为candidate时，跳过
+        candidate_element = [0 for i in range(len(self.elements))]
+        # print(len(candidate_element))
         for bucket_id, bucket in enumerate(self.buckets):
             anchor_word = anchor[bucket_id*self._word_length:(bucket_id+1)*self._word_length]
             suitable_words = self.get_candidates(anchor_word, hamming_distance_threshold // len(self.buckets))
             for word in suitable_words:
                 if word in bucket.hash2leaf:
                     for element in bucket.hash2leaf[word].elements:
-                        if element.id not in results:
-                            distance = self.hamming_distance(anchor, element.hash)
-                            if distance <= hamming_distance_threshold:
-                                result = {
-                                    'bucket_id': bucket.id,
-                                    'leaf_id': bucket.hash2leaf[word].id,
-                                    'distance': distance,
-                                    'hash': element.hash.hex(),
-                                    'subling_merkle_hashs': [],
-                                    'leaf_r': bucket.hash2leaf[word].r,
-                                    'leaf_s': bucket.hash2leaf[word].s,
-                                    'bucket_r': bucket.r,
-                                    'bucket_s': bucket.s
-                                }
-                                for subling in bucket.hash2leaf[word].elements:
-                                    if subling.id != element.id:
-                                        result['subling_merkle_hashs'].append(subling.merkle_hash.hex())
-                                    else:
-                                        result['subling_merkle_hashs'].append(None)
-                                results[element.id] = result
+                        if candidate_element[element.id] != 1:
+                            candidate_element[element.id] = 1
+                            if element.id not in results:
+                                distance = self.hamming_distance(anchor, element.hash)
+                                if distance <= hamming_distance_threshold:
+                                    result = {
+                                        'bucket_id': bucket.id,
+                                        'leaf_id': bucket.hash2leaf[word].id,
+                                        'distance': distance,
+                                        'hash': element.hash.hex(),
+                                        'subling_merkle_hashs': [],
+                                        'leaf_r': bucket.hash2leaf[word].r,
+                                        'leaf_s': bucket.hash2leaf[word].s,
+                                        'bucket_r': bucket.r,
+                                        'bucket_s': bucket.s
+                                    }
+                                    for subling in bucket.hash2leaf[word].elements:
+                                        if subling.id != element.id:
+                                            result['subling_merkle_hashs'].append(subling.merkle_hash.hex())
+                                        else:
+                                            result['subling_merkle_hashs'].append(None)
+                                    results[element.id] = result
+                            
 
         merkle_tree = {
             'root': self.root_merkle_hash.hex(),
@@ -312,26 +318,26 @@ class MIHIndex:
         for bucket in self.buckets:
             anchor_word = anchor[bucket.id*self._word_length:(bucket.id+1)*self._word_length].tobytes()
             if anchor_word in bucket.hash2leaf:
-                print("Option 1, need to add element to existing leaf node")
+                # print("Option 1, need to add element to existing leaf node")
                 leaf_node = bucket.hash2leaf[anchor_word]
                 tmp_merkle_hash = b''.join([ele.merkle_hash for ele in leaf_node.elements])
                 tmp_merkle_hash += sha256(anchor.tobytes()).digest()
                 temp_hash, new_r, new_s = cham_hash.find_collision(pk, sk, leaf_node.C, tmp_merkle_hash)
                 if sha256(temp_hash).digest() == leaf_node.merkle_hash:
-                    print("Find collision successfully, adding element to leaf node")
+                    # print("Find collision successfully, adding element to leaf node")
                     leaf_node.elements.append(Element(anchor.tobytes(), self.cnt))
                     leaf_node.r = new_r
                     leaf_node.s = new_s
                 else:
                     raise ValueError('Failed to add element, merkle hash mismatch')
             else:
-                print("Option 2, need to create a new leaf node")
+                # print("Option 2, need to create a new leaf node")
                 new_leaf_node = LeafNode([Element(anchor.tobytes(), self.cnt)], len(bucket.leaf_nodes), cham_hash, pk)
                 tmp_merkle_hash = b''.join([leaf.merkle_hash for leaf in bucket.leaf_nodes])
                 tmp_merkle_hash += new_leaf_node.merkle_hash
                 temp_hash, new_r, new_s = cham_hash.find_collision(pk, sk, bucket.C, tmp_merkle_hash)
                 if sha256(temp_hash).digest() == bucket.merkle_hash:
-                    print("Find collision successfully, adding new leaf node")
+                    # print("Find collision successfully, adding new leaf node")
                     bucket.leaf_nodes.append(new_leaf_node)
                     bucket.hashs.append(anchor_word)
                     bucket.hash2leaf[anchor_word] = new_leaf_node
@@ -454,54 +460,101 @@ if __name__ == '__main__':
     print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
     print('验证耗时: ', time.time() - s)
 
-    # test add
+    """ 1. test add one """
     # new_element = bytes.fromhex("c595f84f4eaf47f46bc1186098802f91")
-    new_element = bytes.fromhex("ffffffffffffffffffffffffffffffff")
-    print('待添加的 anchor: ', new_element.hex())
-    s = time.time()
-    mih.add(new_element, cham_hash, pk, sk)
-    print('添加耗时: ', time.time() - s)
-    mih.save()
+    # # new_element = bytes.fromhex("ffffffffffffffffffffffffffffffff")
+    # print('待添加的 anchor: ', new_element.hex())
+    # s = time.time()
+    # mih.add(new_element, cham_hash, pk, sk)
+    # print('添加耗时: ', time.time() - s)
+    # mih.save()
 
-    print("汉明距离阈值： ", t)
-    s = time.time()
-    results = mih.linear_search(anchor, hamming_distance_threshold=t)
-    print('线性搜索耗时: ', time.time() - s)
-    print('线性搜索结果: ', list(results.keys()))
+    # print("汉明距离阈值： ", t)
+    # s = time.time()
+    # results = mih.linear_search(anchor, hamming_distance_threshold=t)
+    # print('线性搜索耗时: ', time.time() - s)
+    # print('线性搜索结果: ', list(results.keys()))
 
-    s = time.time()
-    results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
-    # print(json.dumps(results, indent=4))
-    # print(merkle_tree)
-    print('MIH 搜索耗时: ', time.time() - s)
-    print('MIH 搜索结果: ', list(results.keys()))
+    # s = time.time()
+    # results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
+    # # print(json.dumps(results, indent=4))
+    # # print(merkle_tree)
+    # print('MIH 搜索耗时: ', time.time() - s)
+    # print('MIH 搜索结果: ', list(results.keys()))
 
-    s = time.time()
-    print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
-    print('验证耗时: ', time.time() - s)
+    # s = time.time()
+    # print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
+    # print('验证耗时: ', time.time() - s)
 
-    # test delete
+    # anchor_test = bytes.fromhex("c595f84f4eaf47f46bc1186098802f91")
+    # print('测试 anchor: ', anchor_test.hex())
+    # t = 8
+    # print('汉明距离阈值: ', t)
+    # s = time.time()
+    # results = mih.linear_search(anchor_test, hamming_distance_threshold=t)
+    # print('线性搜索耗时: ', time.time() - s)
+    # print('线性搜索结果: ', list(results.keys()))
+
+    # s = time.time()
+    # results, merkle_tree = mih.query(anchor_test, hamming_distance_threshold=t)
+    # print('MIH 搜索耗时: ', time.time() - s)
+    # print('MIH 搜索结果: ', list(results.keys()))
+
+    # s = time.time()
+    # print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
+    # print('验证耗时: ', time.time() - s)
+
+    """ 2. test delete one """
     # del_element = bytes.fromhex("c595f84f4eaf47f46bc1186098802f91")
-    del_element = bytes.fromhex("ffffffffffffffffffffffffffffffff")
-    print('待删除的 anchor: ', del_element.hex())
-    s = time.time()
-    mih.delete(del_element, cham_hash, pk, sk)
-    print('删除耗时: ', time.time() - s)
-    mih.save()
+    # # del_element = bytes.fromhex("ffffffffffffffffffffffffffffffff")
+    # print('待删除的 anchor: ', del_element.hex())
+    # s = time.time()
+    # mih.delete(del_element, cham_hash, pk, sk)
+    # print('删除耗时: ', time.time() - s)
+    # mih.save()
 
-    print("汉明距离阈值： ", t)
-    s = time.time()
-    results = mih.linear_search(anchor, hamming_distance_threshold=t)
-    print('线性搜索耗时: ', time.time() - s)
-    print('线性搜索结果: ', list(results.keys()))
+    # print("汉明距离阈值： ", t)
+    # s = time.time()
+    # results = mih.linear_search(anchor, hamming_distance_threshold=t)
+    # print('线性搜索耗时: ', time.time() - s)
+    # print('线性搜索结果: ', list(results.keys()))
 
-    s = time.time()
-    results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
-    # print(json.dumps(results, indent=4))
-    # print(merkle_tree)
-    print('MIH 搜索耗时: ', time.time() - s)
-    print('MIH 搜索结果: ', list(results.keys()))
+    # s = time.time()
+    # results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
+    # # print(json.dumps(results, indent=4))
+    # # print(merkle_tree)
+    # print('MIH 搜索耗时: ', time.time() - s)
+    # print('MIH 搜索结果: ', list(results.keys()))
 
-    s = time.time()
-    print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
-    print('验证耗时: ', time.time() - s)
+    # s = time.time()
+    # print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
+    # print('验证耗时: ', time.time() - s)
+
+    """ 3. test add 1000 """
+    # with open('add1000.bin', 'rb') as f:
+    #     data = f.read()
+    # print('待添加的 1000 个 anchor: ', len(data) // 16)
+    # s = time.time()
+    # for i in range(len(data) // 16):
+    #     new_element = data[i*16:(i+1)*16]
+    #     print('添加第 {} 个 anchor: {}'.format(i, new_element.hex()))
+    #     mih.add(new_element, cham_hash, pk, sk)
+    # print('添加 1000 个元素耗时: ', time.time() - s)
+    # mih.save()
+    
+    # print("汉明距离阈值： ", t)
+    # s = time.time()
+    # results = mih.linear_search(anchor, hamming_distance_threshold=t)
+    # print('线性搜索耗时: ', time.time() - s)
+    # print('线性搜索结果: ', list(results.keys()))
+
+    # s = time.time()
+    # results, merkle_tree = mih.query(anchor, hamming_distance_threshold=t)
+    # # print(json.dumps(results, indent=4))
+    # # print(merkle_tree)
+    # print('MIH 搜索耗时: ', time.time() - s)
+    # print('MIH 搜索结果: ', list(results.keys()))
+
+    # s = time.time()
+    # print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
+    # print('验证耗时: ', time.time() - s)
