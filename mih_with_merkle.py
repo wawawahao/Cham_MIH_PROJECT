@@ -514,9 +514,9 @@ if __name__ == '__main__':
     pk, sk = cham_hash.paramgen()
 
     mih = MIHIndex(database_path='ada_total_hashes.bin', hash_length=128, word_length=16, cham_hash=cham_hash, pk=pk, sk=sk)
-    anchor = bytes.fromhex("ffffffffffffffffffffffffffffffff")
+    # anchor = bytes.fromhex("ffffffffffffffffffffffffffffffff")
     # 随机选取 element
-    # anchor = np.random.choice(mih.elements).hash
+    anchor = np.random.choice(mih.elements).hash
     # anchor = mih.elements[0].hash
     print('待检索的 anchor: ', anchor.hex())
 
