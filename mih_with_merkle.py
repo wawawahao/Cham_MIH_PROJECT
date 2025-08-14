@@ -13,6 +13,8 @@ from charm.toolbox.Hash import ChamHash
 from charm.toolbox.integergroup import IntegerGroupQ
 from charm.core.math.integer import integer
 
+import numpy as np
+
 class ChamHash_Adm05(ChamHash):
     def __init__(self, p=0, q=0):
         ChamHash.__init__(self)
@@ -258,17 +260,17 @@ class MIHIndex:
                                         'leaf_id': bucket.hash2leaf[word].id,
                                         'distance': distance,
                                         'hash': element.hash.hex(),
-                                        'subling_merkle_hashs': [],
-                                        'leaf_r': bucket.hash2leaf[word].r,
-                                        'leaf_s': bucket.hash2leaf[word].s,
-                                        'bucket_r': bucket.r,
-                                        'bucket_s': bucket.s
+                                        # 'subling_merkle_hashs': [],
+                                        # 'leaf_r': bucket.hash2leaf[word].r,
+                                        # 'leaf_s': bucket.hash2leaf[word].s,
+                                        # 'bucket_r': bucket.r,
+                                        # 'bucket_s': bucket.s
                                     }
-                                    for subling in bucket.hash2leaf[word].elements:
-                                        if subling.id != element.id:
-                                            result['subling_merkle_hashs'].append(subling.merkle_hash.hex())
-                                        else:
-                                            result['subling_merkle_hashs'].append(None)
+                                    # for subling in bucket.hash2leaf[word].elements:
+                                    #     if subling.id != element.id:
+                                    #         result['subling_merkle_hashs'].append(subling.merkle_hash.hex())
+                                    #     else:
+                                    #         result['subling_merkle_hashs'].append(None)
                                     results[element.id] = result
                             
 
@@ -287,24 +289,72 @@ class MIHIndex:
         for result in results.values():
             buckets_count[result['bucket_id']] += 1
             leaves_count[result['bucket_id']][result['leaf_id']] += 1
+
+        # for i, bucket in enumerate(self.buckets):
+        #     if buckets_count[i] == 0:
+        #         merkle_tree['buckets'][i] = bucket.merkle_hash.hex()
         
-        merkle_tree['buckets'] = [None for _ in range(len(self.buckets))]
+        """修改 返回检索结果 逻辑"""
+        merkle_tree['buckets'] = {}
         for i, bucket in enumerate(self.buckets):
             if buckets_count[i] == 0:
-                merkle_tree['buckets'][i] = bucket.merkle_hash.hex()
+                # 如果当前 bucket 没有检索结果, 那么直接返回 bucket 的 merkle_hash
+                merkle_tree['buckets'][i] = {
+                    'merkle_hash': bucket.merkle_hash.hex()
+                }
+            else:
+                # 如果当前 bucket 有检索结果, 那么需要返回 r, s 信息来用于验证时得到 merkle_hash
+                merkle_tree['buckets'][i] = {
+                    'merkle_hash': None,
+                    'bucket_r': bucket.r,
+                    'bucket_s': bucket.s
+                }
+
         
-        merkle_tree['leaves'] = [None for _ in range(len(self.buckets))]
+        # merkle_tree['leaves'] = [None for _ in range(len(self.buckets))]
+        # for i, bucket in enumerate(self.buckets):
+        #     if buckets_count[i] == 0:
+        #         merkle_tree['leaves'][i] = None
+        #     else:
+        #         merkle_tree['leaves'][i] = []
+        #         for j, leaf in enumerate(bucket.leaf_nodes):
+        #             if leaves_count[i][j] == 0:
+        #                 merkle_tree['leaves'][i].append(leaf.merkle_hash.hex())
+        #             else:
+        #                 merkle_tree['leaves'][i].append(None)
+
+        """修改 返回检索结果 逻辑"""
+        merkle_tree['leaves'] = {}
         for i, bucket in enumerate(self.buckets):
             if buckets_count[i] == 0:
+                # 如果当前 bucket 没有检索结果, 那么刚刚的 merkle_tree['buckets'] 已经记录了 bucket 的 merkle_hash, 此处无需多余记录信息
                 merkle_tree['leaves'][i] = None
             else:
-                merkle_tree['leaves'][i] = []
+                # 如果当前 bucket 有检索结果, 那么需要找到是哪个 leaf 的信息, 以及其余辅助验证信息
+                merkle_tree['leaves'][i] = {}
                 for j, leaf in enumerate(bucket.leaf_nodes):
                     if leaves_count[i][j] == 0:
-                        merkle_tree['leaves'][i].append(leaf.merkle_hash.hex())
+                        # 检索结果不在当前叶子节点
+                        merkle_tree['leaves'][i][j] = {
+                            'merkle_hash': leaf.merkle_hash.hex()
+                        }
                     else:
-                        merkle_tree['leaves'][i].append(None)
-        
+                        # 检索结果在当前叶子节点
+                        merkle_tree['leaves'][i][j] = {
+                            'merkle_hash': None,
+                            'leaf_r': leaf.r,
+                            'leaf_s': leaf.s,
+                            'subling_merkle_hashs': []
+                        }
+                        for ele in leaf.elements:
+                            if ele.id not in results:
+                                # 该 element 不在检索结果中
+                                merkle_tree['leaves'][i][j]['subling_merkle_hashs'].append(ele.merkle_hash.hex())
+                            else:
+                                if results[ele.id]['bucket_id'] == i and results[ele.id]['leaf_id'] == j:
+                                    # 该 element 在检索结果中
+                                    merkle_tree['leaves'][i][j]['subling_merkle_hashs'].append(None)
+
         return results, merkle_tree
     
     def add(self, element, cham_hash, pk, sk):
@@ -389,36 +439,61 @@ class MIHIndex:
             pickle.dump(self, f)
         return
 
+"""修改 验证 逻辑"""
 def verify_proof(results, merkle_tree, cham_hash, pk):
     bucket_hash = []
+    # result_acc = [0 for i in range(len(results))]
     try:  # 当敌手增加或删除了 results 以及 merkle_tree 时，可能会导致异常
         for i, bucket in enumerate(merkle_tree['buckets']):
-            if bucket is not None:
-                bucket_hash.append(bytes.fromhex(merkle_tree['buckets'][i]))
+            # print(merkle_tree['buckets'][i]['merkle_hash'])
+            if merkle_tree['buckets'][i]['merkle_hash'] is not None:
+                # 如果当前 bucket 的 merkle_hash 存在, 那么不需要计算恢复
+                bucket_hash.append(bytes.fromhex(merkle_tree['buckets'][i]['merkle_hash']))
             else:
-                # 利用叶子节点的 hash 恢复 bucket hash
+                # 如果当前 bucket 的 merkle_hash 不存在, 那么需要利用 leaf 的 merkle_hash 恢复 bucket 的 merkle_hash
                 leaf_hash = []
                 for j, leaf in enumerate(merkle_tree['leaves'][i]):
-                    if leaf is not None:
-                        leaf_hash.append(bytes.fromhex(leaf))
+                    # print(merkle_tree['leaves'][i][j]['merkle_hash'])
+                    if merkle_tree['leaves'][i][j]['merkle_hash'] is not None:
+                        leaf_hash.append(bytes.fromhex(merkle_tree['leaves'][i][j]['merkle_hash']))
                     else:
                         # 利用检索结果恢复叶子节点 hash
                         # 根据 bucket_id, leaf_id 找到检索结果
-                        result = None
-                        for result in results.values():
-                            if result['bucket_id'] == i and result['leaf_id'] == j:
-                                break
-                        result_hash = sha256(bytes.fromhex(result['hash'])).digest()
+                        # temp_result = {}
+                        # for i, result in enumerate(results):
+                        #     if results[i]['bucket_id'] == i and results[i]['leaf_id'] == j:
+                        #         temp_result[result] = result
+                        # result_hash = sha256(bytes.fromhex(result['hash'])).digest()
                         # 根据 result_hash 和 subling_merkle_hashs 恢复 leaf hash
+                        
                         subling_merkle_hashs = []
-                        for subling_merkle_hash in result['subling_merkle_hashs']:
+                        result_hash = []
+                        for res in results:
+                            if results[res]['bucket_id'] == i and results[res]['leaf_id'] == j:
+                                result_hash.append(sha256(bytes.fromhex(results[res]['hash'])).digest())
+                        cnt = 0
+                        # print(merkle_tree['leaves'][i][j]['subling_merkle_hashs'])
+                        for subling_merkle_hash in merkle_tree['leaves'][i][j]['subling_merkle_hashs']:
                             if subling_merkle_hash is not None:
                                 subling_merkle_hashs.append(bytes.fromhex(subling_merkle_hash))
                             else:
-                                subling_merkle_hashs.append(result_hash)
-                        temp_hash_1, temp_r_1, temp_s_2 = cham_hash.hash(pk, b''.join(subling_merkle_hashs), result['leaf_r'], result['leaf_s'])
+                                result = None
+                                # print(result)
+                                # print(i, j)
+                                # print(results)
+                                # for res in results:
+                                #     # print(f"res['bucket_id]: {res['bucket_id']}, res['leaf_id']: {res['leaf_id']}, res['flag']: {res['flag']}")
+                                #     if results[res]['bucket_id'] == i and results[res]['leaf_id'] == j and results[res]['flag'] == False:
+                                #         result_hash = results[res]['hash']
+                                #         results[res]['flag'] = True
+                                        
+                                # print(f"[CHECK] result: {result}")
+                                subling_merkle_hashs.append(result_hash[cnt])
+                                cnt += 1
+                        temp_hash_1, temp_r_1, temp_s_2 = cham_hash.hash(pk, b''.join(subling_merkle_hashs), merkle_tree['leaves'][i][j]['leaf_r'], merkle_tree['leaves'][i][j]['leaf_s'])
                         leaf_hash.append(sha256(temp_hash_1).digest())
-                temp_hash_2, temp_r_1, temp_r_2 = cham_hash.hash(pk, b''.join(leaf_hash), result['bucket_r'], result['bucket_s'])
+                        
+                temp_hash_2, temp_r_1, temp_r_2 = cham_hash.hash(pk, b''.join(leaf_hash), merkle_tree['buckets'][i]['bucket_r'], merkle_tree['buckets'][i]['bucket_s'])
                 bucket_hash.append(sha256(temp_hash_2).digest())
         root_hash = sha256(b''.join(bucket_hash)).digest()
     except:
@@ -438,11 +513,14 @@ if __name__ == '__main__':
     cham_hash = ChamHash_Adm05(p, q)
     pk, sk = cham_hash.paramgen()
 
-    mih = MIHIndex(database_path='webface10b.bin', hash_length=128, word_length=16, cham_hash=cham_hash, pk=pk, sk=sk)
-    anchor = bytes.fromhex("c595f84f4eaf47f46bc1186098802f90")
+    mih = MIHIndex(database_path='ada_total_hashes.bin', hash_length=128, word_length=16, cham_hash=cham_hash, pk=pk, sk=sk)
+    anchor = bytes.fromhex("ffffffffffffffffffffffffffffffff")
+    # 随机选取 element
+    # anchor = np.random.choice(mih.elements).hash
+    # anchor = mih.elements[0].hash
     print('待检索的 anchor: ', anchor.hex())
 
-    t = 8
+    t = 28
     print('汉明距离阈值: ', t)
     s = time.time()
     results = mih.linear_search(anchor, hamming_distance_threshold=t)
@@ -455,6 +533,9 @@ if __name__ == '__main__':
     # print(merkle_tree)
     print('MIH 搜索耗时: ', time.time() - s)
     print('MIH 搜索结果: ', list(results.keys()))
+    # 输出 results 和 merkle_tree
+    # print('Merkle 树: ', merkle_tree)
+    # print('搜索结果: ', results)
 
     s = time.time()
     print('验证结果: ', verify_proof(results, merkle_tree, cham_hash, pk))
