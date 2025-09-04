@@ -5,6 +5,8 @@
     1) 检索结果
     2) 预处理验证
     3) 结果验证
+3. 在 try_1.py 基础上做修改
+    1) 修改 MIHIndex 结构, 每个 element 记录其所属 leaf_node 的标号, 以及在当前 leaf_node 下的位置信息
 """
 
 import xxhash
@@ -128,17 +130,24 @@ class MIHIndex:
                 leaf_nodes = []
                 for key, value in index.items():
                     hashs.append(key)
-                    leaf_nodes.append(LeafNode(len(leaf_nodes), [self.elements[i] for i in value]))
+                    # 修改 element 存储 leaf_node 的标号逻辑
+                    leaf_elements = []
+                    cnt = 0
+                    for i in value:
+                        self.elements[i].leaf_pos.append((len(leaf_nodes), cnt))
+                        cnt += 1
+                        leaf_elements.append(self.elements[i])
+                    leaf_nodes.append(LeafNode(len(leaf_nodes), leaf_elements))
                 self.buckets.append(BucketNode(bucket_id, hashs, leaf_nodes))
             
             # 构造 root_merkle_hash
             self.root_merkle_hash = xxhash.xxh128(b''.join([bucket.merkle_hash for bucket in self.buckets])).digest()
 
             # 记录辅助信息, 即每个 element 属于 leaf_node 的标号
-            for bucket_id, bucket in enumerate(self.buckets):
-                for leaf_id, leaf_node in enumerate(bucket.leaf_nodes):
-                    for element in leaf_node.elements:
-                        element.leaf_pos.append(leaf_node.id)
+            # for bucket_id, bucket in enumerate(self.buckets):
+            #     for leaf_id, leaf_node in enumerate(bucket.leaf_nodes):
+            #         for element in leaf_node.elements:
+            #             element.leaf_pos.append(leaf_node.id)
             
             # 写入 .pkl 文件
             with open('mih_index.pkl', 'wb') as f:
@@ -229,6 +238,8 @@ class MIHIndex:
                                 result = {
                                     'hash': element.hash,
                                     'distance': distance,
+                                    'leaf_id': element.leaf_pos[0][0],
+                                    'leaf_pos': element.leaf_pos[0][1],
                                 }
                                 results[element.id] = result
 
@@ -239,38 +250,71 @@ class MIHIndex:
         对结果验证的 proof 做预处理
         """
         merkle_tree = {
-            'bucket_merkle_hash': self.buckets[0].merkle_hash,
+            'root_merkle_hash': self.root_merkle_hash,
+            'bucket_nodes_merkle_hash': b'',
             'leaf_nodes_merkle_hash': b'',
-            'subling_merkle_hash': [],
+            'subling_merkle_hash': {},
         }
-        leaf_res_id = []
-        for key, result in results.items():
-            element_id = key
-            leaf_res_id.append(self.elements[element_id].leaf_pos[0])
-        leaf_res_id.sort()
+        leaf_res_id = {}
+        for res in results:
+            leaf_id = results[res]['leaf_id']
+            leaf_pos = results[res]['leaf_pos']
+            if leaf_id not in leaf_res_id:
+                leaf_res_id[leaf_id] = [leaf_pos]
+            else:
+                leaf_res_id[leaf_id].append(leaf_pos)
+            
+        
         # print(leaf_res_id)
+        
+        # 预先计算 bucket_node 的 merkle_hash, 默认需要恢复第一个 bucket_node 的 merkle_hash
+        for bucket_id, bucket in enumerate(self.buckets):
+            if bucket_id == 0:
+                merkle_tree['bucket_nodes_merkle_hash'] += b'\x00' * 16
+            else:
+                merkle_tree['bucket_nodes_merkle_hash'] += bucket.merkle_hash
+        
+        # 预先计算第一个 bucket_node 下的 leaf_node 的 merkle_hash
         for leaf_id, leaf_node in enumerate(self.buckets[0].leaf_nodes):
             if leaf_id not in leaf_res_id:
                 merkle_tree['leaf_nodes_merkle_hash'] += leaf_node.merkle_hash
             else:
                 merkle_tree['leaf_nodes_merkle_hash'] += b'\x00' * 16
-                merkle_tree['subling_merkle_hash'].append((leaf_node.id, leaf_node.merkle_hash))
-        
+                element_merkle_hash = b''
+                # 预先计算当前 leaf_node 下的 element 的 merkle_hash
+                for element in leaf_node.elements:
+                    if element.id not in results:
+                        element_merkle_hash += element.merkle_hash
+                    else:
+                        element_merkle_hash += b'\x00' * 16
+                merkle_tree['subling_merkle_hash'][leaf_id] = element_merkle_hash
+
         return merkle_tree
 
-def verify_proof(merkle_tree):
+def verify_proof(results, merkle_tree):
     """
     根据预处理的 proof 进行验证
     """
-    tmp = bytearray(merkle_tree['leaf_nodes_merkle_hash'])
-    for i in range(len(merkle_tree['subling_merkle_hash'])):
-        leaf_id = merkle_tree['subling_merkle_hash'][i][0]
-        leaf_merkle_hash = merkle_tree['subling_merkle_hash'][i][1]
-        tmp[leaf_id * 16 : (leaf_id + 1) * 16] = leaf_merkle_hash
-    merkle_tree['leaf_nodes_merkle_hash'] = bytes(tmp)
-    bucket_merkle_hash = xxhash.xxh128(merkle_tree['leaf_nodes_merkle_hash']).digest()
+    for res in results:
+        leaf_id = results[res]['leaf_id']
+        leaf_pos = results[res]['leaf_pos']
+        tmp_merkle_hash = bytearray(merkle_tree['subling_merkle_hash'][leaf_id])
+        tmp_merkle_hash[leaf_pos * 16 : (leaf_pos + 1) * 16] = xxhash.xxh128(results[res]['hash']).digest()
+        merkle_tree['subling_merkle_hash'][leaf_id] = bytes(tmp_merkle_hash)
+    
+    tmp_leaf_merkle_hash = bytearray(merkle_tree['leaf_nodes_merkle_hash'])
+    for res in results:
+        leaf_id = results[res]['leaf_id']
+        tmp_leaf_merkle_hash[leaf_id * 16 : (leaf_id + 1) * 16] = xxhash.xxh128(merkle_tree['subling_merkle_hash'][leaf_id]).digest()
+    merkle_tree['leaf_nodes_merkle_hash'] = bytes(tmp_leaf_merkle_hash)
 
-    return bucket_merkle_hash == merkle_tree['bucket_merkle_hash']
+    tmp_bucket_merkle_hash = bytearray(merkle_tree['bucket_nodes_merkle_hash'])
+    tmp_bucket_merkle_hash[0 : 16] = xxhash.xxh128(merkle_tree['leaf_nodes_merkle_hash']).digest()
+    merkle_tree['bucket_nodes_merkle_hash'] = bytes(tmp_bucket_merkle_hash)
+
+    root_merkle_hash = xxhash.xxh128(merkle_tree['bucket_nodes_merkle_hash']).digest()
+
+    return root_merkle_hash == merkle_tree['root_merkle_hash']
 
 if __name__ == '__main__':
     # 构造 MIHIndex 
@@ -279,9 +323,9 @@ if __name__ == '__main__':
     # 构造 query
     anchor = np.random.choice(mih.elements)
     # anchor = mih.elements[0]
-    hamming_distance = 8
+    hamming_distance = 28
     print(f"[INFO] 待检索的 anchor: {anchor.hash.hex()}")
-    print(f"[INFO] anchor 所属的 leaf_node 标号: {anchor.leaf_pos}")
+    # print(f"[INFO] anchor 所属的 leaf_node 标号: {anchor.leaf_pos}")
     print(f"[INFO] 汉明距离阈值: {hamming_distance}")
 
     # 线性检索
@@ -306,7 +350,7 @@ if __name__ == '__main__':
 
     # 结果验证
     s = time.time()
-    flag = verify_proof(merkle_tree)
+    flag = verify_proof(results_query, merkle_tree)
     e = time.time() - s
     print(f"[INFO] 验证耗时: {e} 秒")
     print(f"[INFO] 验证结果: {flag}")
