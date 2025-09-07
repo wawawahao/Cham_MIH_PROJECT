@@ -333,7 +333,7 @@ def add_results(results):
         'leaf_id': np.random.randint(0, 1000),
         'leaf_pos': np.random.randint(0, 100),
     }  
-    results_query_add = results.copy()  
+    results_query_add = copy.deepcopy(results)  
     results_query_add[fake_id] = result
     
     return results_query_add
@@ -343,7 +343,7 @@ def delete_results(results):
     模拟修改检索结果, 删除一条 "真实的结果"
     """
     delete_id = list(results.keys())[np.random.randint(0, len(results))]
-    results_query_delete = results.copy()
+    results_query_delete = copy.deepcopy(results)
     # print(f"[INFO] 删除的结果是: {results_query_delete[delete_id]}")
     results_query_delete.pop(delete_id)
     return results_query_delete
@@ -353,7 +353,7 @@ def modify_results(results):
     模拟修改检索结果, 修改一条 "真实的结果"的特征值
     """
     modify_id = list(results.keys())[0]
-    results_query_modify = results.copy()
+    results_query_modify = copy.deepcopy(results)
     results_query_modify[modify_id]['hash'] = np.random.bytes(16)
     return results_query_modify
 
