@@ -248,13 +248,13 @@ class MIHIndex:
                             distance = self.hamming_distance(anchor, element.hash)
                             if distance <= hamming_distance_threshold:
                                 result = {
-                                    'hash': element.hash,
+                                    'hash': bytearray(element.hash),
                                     'distance': distance,
                                     'leaf_id': element.leaf_pos[0][0],
                                     'leaf_pos': element.leaf_pos[0][1],
                                 }
                                 results[element.id] = result
-                                if len(results) >= 5:
+                                if len(results) >= 10:
                                     flag = True
                                     break
                     if flag:
@@ -265,7 +265,7 @@ class MIHIndex:
         对结果验证的 proof 做预处理
         """
         merkle_tree = {
-            'root_merkle_hash': self.root_merkle_hash,
+            'root_merkle_hash': bytearray(self.root_merkle_hash),
             'bucket_nodes_merkle_hash': b'',
             'leaf_nodes_merkle_hash': b'',
             'subling_merkle_hash': {},
@@ -311,7 +311,7 @@ def verify_proof(results, merkle_tree):
             leaf_pos = results[res]['leaf_pos']
             
             # print(f"[DEBUG] {tmp_merkle_hash[leaf_pos * 16 : (leaf_pos + 1) * 16]}")
-            merkle_tree['subling_merkle_hash'][leaf_id][leaf_pos * 16 : (leaf_pos + 1) * 16] = xxhash.xxh128(results[res]['hash']).digest()
+            merkle_tree['subling_merkle_hash'][leaf_id][leaf_pos * 16 : (leaf_pos + 1) * 16] = xxhash.xxh128(bytes(results[res]['hash'])).digest()
             # print(f"[DEBUG] {tmp_merkle_hash[leaf_pos * 16 : (leaf_pos + 1) * 16]}")
             # merkle_tree['subling_merkle_hash'][leaf_id] = bytes(tmp_merkle_hash)
         # e1 = time.time() - s1
@@ -342,7 +342,7 @@ def verify_proof(results, merkle_tree):
         # print(f"[DEBUG] 恢复 root_merkle_hash 耗时: {e} s")
         
         # s5 = time.time()
-        is_valid = (root_merkle_hash == merkle_tree['root_merkle_hash'])
+        is_valid = (bytearray(root_merkle_hash) == merkle_tree['root_merkle_hash'])
         # e5 = time.time() - s5
         # print(f"[DEBUG] 对比 root_merkle_hash 耗时: {e} s")
         
@@ -365,7 +365,7 @@ def add_results(results):
     """
     fake_id = np.random.randint(0, 10322118)    # 默认已知数据集大小, 所以在数据集大小范围内随机生成一个 id
     result = {
-        'hash': np.random.bytes(16),
+        'hash': bytearray(np.random.bytes(16)),
         'distance': 6,
         'leaf_id': np.random.randint(0, 1000),
         'leaf_pos': np.random.randint(0, 100),
@@ -391,20 +391,20 @@ def modify_results(results):
     """
     modify_id = list(results.keys())[0]
     results_query_modify = copy.deepcopy(results)
-    results_query_modify[modify_id]['hash'] = np.random.bytes(16)
+    results_query_modify[modify_id]['hash'] = bytearray(np.random.bytes(16))
     return results_query_modify
 
 if __name__ == '__main__':
     # 构造 MIHIndex
-    mih = MIHIndex(database_path = 'image_hashes.bin', hash_length = 128, word_length = 16)
+    mih = MIHIndex(database_path = 'ada_total_hashes.bin', hash_length = 128, word_length = 16)
     verification_time = []
     # 测试 20 组
-    for i in range(10000):
+    for i in range(20):
         print(f"\n[INFO] 第 {i + 1} 组测试")
         # 构造 query
         anchor = np.random.choice(mih.elements)
         # anchor = mih.elements[i]
-        hamming_distance = 4
+        hamming_distance = 28
         print(f"[INFO] 待检索的 anchor: {anchor.hash.hex()}")
         # print(f"[INFO] anchor 所属的 leaf_node 标号: {anchor.leaf_pos}")
         print(f"[INFO] 汉明距离阈值: {hamming_distance}")
@@ -436,7 +436,7 @@ if __name__ == '__main__':
         verification_time.append(e)
 
         # 将 verification_time 写入 verification_time_10.json 文件
-        with open('verification_time_5.json', 'w') as f:
+        with open('verification_time_10.json', 'w') as f:
             json.dump(verification_time, f)
 
         # if e >= 0.001:
