@@ -21,6 +21,7 @@ import pickle
 import time
 import numpy as np
 import copy
+import json
 
 from bitarray import bitarray
 from tqdm import tqdm
@@ -235,6 +236,8 @@ class MIHIndex:
         
         results = {}
 
+        flag = False
+
         for bucket_id, bucket in enumerate(self.buckets):
             anchor_word = anchor[bucket_id * self._word_length : (bucket_id + 1) * self._word_length]
             suitable_words = self.get_candidates(anchor_word, hamming_distance_threshold // len(self.buckets))
@@ -251,6 +254,13 @@ class MIHIndex:
                                     'leaf_pos': element.leaf_pos[0][1],
                                 }
                                 results[element.id] = result
+                                if len(results) >= 5:
+                                    flag = True
+                                    break
+                    if flag:
+                        break
+            if flag:
+                break
         """
         对结果验证的 proof 做预处理
         """
@@ -264,14 +274,16 @@ class MIHIndex:
         # 预处理 bucket_node 拼接起来的 merkle_hash
         tmp_bucket_merkle_hash = bytearray(self.buckets_merkle_hash)
         tmp_bucket_merkle_hash[0 : 16] = b'\x00' * 16
-        merkle_tree['bucket_nodes_merkle_hash'] = bytes(tmp_bucket_merkle_hash)
+        # merkle_tree['bucket_nodes_merkle_hash'] = bytes(tmp_bucket_merkle_hash)
+        merkle_tree['bucket_nodes_merkle_hash'] = tmp_bucket_merkle_hash
         
         # 预处理 leaf_node 拼接起来的 merkle_hash
         tmp_leaf_nodes_merkle_hash = bytearray(self.buckets[0].leaf_nodes_merkle_hash)
         for res in results:
             leaf_id = results[res]['leaf_id']
             tmp_leaf_nodes_merkle_hash[leaf_id * 16 : (leaf_id + 1) * 16] = b'\x00' * 16
-        merkle_tree['leaf_nodes_merkle_hash'] = bytes(tmp_leaf_nodes_merkle_hash)
+        # merkle_tree['leaf_nodes_merkle_hash'] = bytes(tmp_leaf_nodes_merkle_hash)
+        merkle_tree['leaf_nodes_merkle_hash'] = tmp_leaf_nodes_merkle_hash
 
         # 预处理带有检索结果的 leaf_node 下的 element 拼接起来的 merkle_hash
         for res in results:
@@ -282,7 +294,8 @@ class MIHIndex:
                     if element.id in results:
                         leaf_pos = results[element.id]['leaf_pos']
                         tmp_subling_merkle_hash[leaf_pos * 16 : (leaf_pos + 1) * 16] = b'\x00' * 16
-                merkle_tree['subling_merkle_hash'][leaf_id] = bytes(tmp_subling_merkle_hash)
+                # merkle_tree['subling_merkle_hash'][leaf_id] = bytes(tmp_subling_merkle_hash)
+                merkle_tree['subling_merkle_hash'][leaf_id] = tmp_subling_merkle_hash
 
         return results, merkle_tree
 
@@ -291,30 +304,54 @@ def verify_proof(results, merkle_tree):
     根据预处理的 proof 进行验证
     """
     try:
+        s_total = time.time()
+        # s1 = time.time()
         for res in results:
             leaf_id = results[res]['leaf_id']
             leaf_pos = results[res]['leaf_pos']
-            tmp_merkle_hash = bytearray(merkle_tree['subling_merkle_hash'][leaf_id])
+            
             # print(f"[DEBUG] {tmp_merkle_hash[leaf_pos * 16 : (leaf_pos + 1) * 16]}")
-            tmp_merkle_hash[leaf_pos * 16 : (leaf_pos + 1) * 16] = xxhash.xxh128(results[res]['hash']).digest()
+            merkle_tree['subling_merkle_hash'][leaf_id][leaf_pos * 16 : (leaf_pos + 1) * 16] = xxhash.xxh128(results[res]['hash']).digest()
             # print(f"[DEBUG] {tmp_merkle_hash[leaf_pos * 16 : (leaf_pos + 1) * 16]}")
-            merkle_tree['subling_merkle_hash'][leaf_id] = bytes(tmp_merkle_hash)
+            # merkle_tree['subling_merkle_hash'][leaf_id] = bytes(tmp_merkle_hash)
+        # e1 = time.time() - s1
+        # print(f"[DEBUG] 恢复 subling_merkle_hash 耗时: {e} s")
 
-        tmp_leaf_merkle_hash = bytearray(merkle_tree['leaf_nodes_merkle_hash'])
+        # s2 = time.time()
+        # tmp_leaf_merkle_hash = bytearray(merkle_tree['leaf_nodes_merkle_hash'])
+        leaf_id_cnt = set()
         for res in results:
             leaf_id = results[res]['leaf_id']
-            tmp_leaf_merkle_hash[leaf_id * 16 : (leaf_id + 1) * 16] = xxhash.xxh128(merkle_tree['subling_merkle_hash'][leaf_id]).digest()
-        merkle_tree['leaf_nodes_merkle_hash'] = bytes(tmp_leaf_merkle_hash)
+            if leaf_id not in leaf_id_cnt:
+                merkle_tree['leaf_nodes_merkle_hash'][leaf_id * 16 : (leaf_id + 1) * 16] = xxhash.xxh128(bytes(merkle_tree['subling_merkle_hash'][leaf_id])).digest()
+                leaf_id_cnt.add(leaf_id)
+        # merkle_tree['leaf_nodes_merkle_hash'] = bytes(merkle_tree['leaf_nodes_merkle_hash'])
+        # e2 = time.time() - s2
+        # print(f"[DEBUG] 恢复 leaf_nodes_merkle_hash 耗时: {e} s")
 
-        tmp_bucket_merkle_hash = bytearray(merkle_tree['bucket_nodes_merkle_hash'])
-        tmp_bucket_merkle_hash[0 : 16] = xxhash.xxh128(merkle_tree['leaf_nodes_merkle_hash']).digest()
-        merkle_tree['bucket_nodes_merkle_hash'] = bytes(tmp_bucket_merkle_hash)
+        # s3 = time.time()
+        # tmp_bucket_merkle_hash = bytearray(merkle_tree['bucket_nodes_merkle_hash'])
+        merkle_tree['bucket_nodes_merkle_hash'][0 : 16] = xxhash.xxh128(bytes(merkle_tree['leaf_nodes_merkle_hash'])).digest()
+        # merkle_tree['bucket_nodes_merkle_hash'] = bytes(tmp_bucket_merkle_hash)
+        # e3 = time.time() - s3
+        # print(f"[DEBUG] 恢复 bucket_nodes_merkle_hash 耗时: {e} s")
 
-        root_merkle_hash = xxhash.xxh128(merkle_tree['bucket_nodes_merkle_hash']).digest()
+        # s4 = time.time()
+        root_merkle_hash = xxhash.xxh128(bytes(merkle_tree['bucket_nodes_merkle_hash'])).digest()
+        # e4 = time.time() - s4
+        # print(f"[DEBUG] 恢复 root_merkle_hash 耗时: {e} s")
+        
+        # s5 = time.time()
+        is_valid = (root_merkle_hash == merkle_tree['root_merkle_hash'])
+        # e5 = time.time() - s5
+        # print(f"[DEBUG] 对比 root_merkle_hash 耗时: {e} s")
+        
+        # e_total = e1 + e2 + e3 + e4 + e5
+        e_total = time.time() - s_total
+        return is_valid, e_total
     except:
         return False
 
-    return root_merkle_hash == merkle_tree['root_merkle_hash']
 
 def add_results(results):
     """
@@ -358,66 +395,80 @@ def modify_results(results):
     return results_query_modify
 
 if __name__ == '__main__':
-    # 构造 MIHIndex 
-    mih = MIHIndex(database_path = 'ada_total_hashes.bin', hash_length = 128, word_length = 16)
-    
+    # 构造 MIHIndex
+    mih = MIHIndex(database_path = 'image_hashes.bin', hash_length = 128, word_length = 16)
+    verification_time = []
     # 测试 20 组
-    for i in range(20):
+    for i in range(10000):
         print(f"\n[INFO] 第 {i + 1} 组测试")
         # 构造 query
         anchor = np.random.choice(mih.elements)
-        hamming_distance = 28
+        # anchor = mih.elements[i]
+        hamming_distance = 4
         print(f"[INFO] 待检索的 anchor: {anchor.hash.hex()}")
         # print(f"[INFO] anchor 所属的 leaf_node 标号: {anchor.leaf_pos}")
         print(f"[INFO] 汉明距离阈值: {hamming_distance}")
 
         # 线性检索
-        s = time.time()
-        results_linear = mih.linear_search(anchor.hash, hamming_distance)
-        e = time.time() - s
-        print(f"[INFO] 线性检索耗时: {e} 秒")
-        print(f"[INFO] 线性检索结果: {len(results_linear.keys())}")
+        # s = time.time()
+        # results_linear = mih.linear_search(anchor.hash, hamming_distance)
+        # e = time.time() - s
+        # print(f"[INFO] 线性检索耗时: {e} 秒")
+        # print(f"[INFO] 线性检索结果: {len(results_linear.keys())}")
 
         # 基于 MIHIndex 检索, 并对检索的结果的 proof 做预处理
         s = time.time()
         results_query, merkle_tree = mih.query(anchor.hash, hamming_distance)
         e = time.time() - s
         print(f"[INFO] MIH 检索耗时: {e} 秒")
-        print(f"[INFO] MIH 检索结果: {results_query}")
+        print(f"[INFO] MIH 检索结果: {len(results_query.keys())}")
 
         # 正确结果验证
-        s = time.time()
-        flag = verify_proof(results_query, copy.deepcopy(merkle_tree))
-        e = time.time() - s
+        # s = time.time()
+        flag, e = verify_proof(results_query, copy.deepcopy(merkle_tree))
+        # e = time.time() - s
         print(f"[INFO] 验证耗时: {e} 秒")
         print(f"[INFO] 验证结果: {flag}")
+        
+        if not flag:
+            print(f"[ERROR] 验证失败, 程序结束")
+            break
+        verification_time.append(e)
+
+        # 将 verification_time 写入 verification_time_10.json 文件
+        with open('verification_time_5.json', 'w') as f:
+            json.dump(verification_time, f)
+
+        # if e >= 0.001:
+        #     print(f"[WARNING] 验证耗时过长, 程序结束")
+        #     break
 
         # 模拟攻击 - 添加一条 "模拟的结果"
-        print(f"[INFO] 模拟攻击 - 添加一条 '模拟的结果'")
-        results_query_add = add_results(results_query)
-        print(f"[INFO] 添加后的结果: {results_query_add}")
-        s = time.time()
-        flag = verify_proof(results_query_add, copy.deepcopy(merkle_tree))
-        e = time.time() - s
-        print(f"[INFO] 验证耗时: {e} 秒")
-        print(f"[INFO] 验证结果: {flag}")
+        # print(f"[INFO] 模拟攻击 - 添加一条 '模拟的结果'")
+        # results_query_add = add_results(results_query)
+        # print(f"[INFO] 添加后的结果: {results_query_add}")
+        # s = time.time()
+        # flag = verify_proof(results_query_add, copy.deepcopy(merkle_tree))
+        # e = time.time() - s
+        # print(f"[INFO] 验证耗时: {e} 秒")
+        # print(f"[INFO] 验证结果: {flag}")
 
-        # 模拟攻击 - 删除一条 "真实的结果"
-        print(f"[INFO] 模拟攻击 - 删除一条 '真实的结果'")
-        results_query_delete = delete_results(results_query)
-        print(f"[INFO] 删除后的结果: {results_query_delete}")
-        s = time.time()
-        flag = verify_proof(results_query_delete, copy.deepcopy(merkle_tree))
-        e = time.time() - s
-        print(f"[INFO] 验证耗时: {e} 秒")
-        print(f"[INFO] 验证结果: {flag}")
+        # # 模拟攻击 - 删除一条 "真实的结果"
+        # print(f"[INFO] 模拟攻击 - 删除一条 '真实的结果'")
+        # results_query_delete = delete_results(results_query)
+        # print(f"[INFO] 删除后的结果: {results_query_delete}")
+        # s = time.time()
+        # flag = verify_proof(results_query_delete, copy.deepcopy(merkle_tree))
+        # e = time.time() - s
+        # print(f"[INFO] 验证耗时: {e} 秒")
+        # print(f"[INFO] 验证结果: {flag}")
 
-        # 模拟攻击 - 修改一条 "真实的结果"
-        print(f"[INFO] 模拟攻击 - 修改一条 '真实的结果'")
-        results_query_modify = modify_results(results_query)
-        print(f"[INFO] 修改后的结果: {results_query_modify}")
-        s = time.time()
-        flag = verify_proof(results_query_modify, copy.deepcopy(merkle_tree))
-        e = time.time() - s
-        print(f"[INFO] 验证耗时: {e} 秒")
-        print(f"[INFO] 验证结果: {flag}")
+        # # 模拟攻击 - 修改一条 "真实的结果"
+        # print(f"[INFO] 模拟攻击 - 修改一条 '真实的结果'")
+        # results_query_modify = modify_results(results_query)
+        # print(f"[INFO] 修改后的结果: {results_query_modify}")
+        # s = time.time()
+        # flag = verify_proof(results_query_modify, copy.deepcopy(merkle_tree))
+        # e = time.time() - s
+        # print(f"[INFO] 验证耗时: {e} 秒")
+        # print(f"[INFO] 验证结果: {flag}")
